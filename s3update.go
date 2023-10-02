@@ -119,6 +119,7 @@ func runAutoUpdate(u Updater) error {
 	remoteVersion := string(b)
 
 	fmt.Printf("s3update: Local Version %s - Remote Version: %s\n", u.CurrentVersion, remoteVersion)
+	// check if remoteVersion is newer
 	if semver.Compare(u.CurrentVersion, remoteVersion) == -1 {
 		fmt.Printf("s3update: version outdated ... \n")
 		s3Key := generateS3ReleaseKey(u.S3ReleaseKey)
