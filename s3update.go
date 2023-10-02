@@ -6,10 +6,11 @@ import (
 	"io"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -44,6 +45,10 @@ var defaultTimeout = 30 * time.Second
 func (u Updater) validate() error {
 	if u.CurrentVersion == "" {
 		return fmt.Errorf("no version set")
+	}
+
+	if !semver.IsValid(u.CurrentVersion) {
+		return fmt.Errorf("invalid version format")
 	}
 
 	if u.S3Bucket == "" {
@@ -98,11 +103,6 @@ func (obj *S3ClientWrapper) GetObject(input *s3.GetObjectInput) (*s3.GetObjectOu
 }
 
 func runAutoUpdate(u Updater) error {
-	localVersion, err := strconv.ParseInt(u.CurrentVersion, 10, 64)
-	if err != nil || localVersion == 0 {
-		return fmt.Errorf("invalid local version")
-	}
-
 	resp, err := u.S3Client.GetObject(
 		&s3.GetObjectInput{Bucket: aws.String(u.S3Bucket), Key: aws.String(u.S3VersionKey)},
 	)
@@ -116,13 +116,10 @@ func runAutoUpdate(u Updater) error {
 		return err
 	}
 
-	remoteVersion, err := strconv.ParseInt(string(b), 10, 64)
-	if err != nil || remoteVersion == 0 {
-		return fmt.Errorf("invalid remote version")
-	}
+	remoteVersion := string(b)
 
-	fmt.Printf("s3update: Local Version %d - Remote Version: %d\n", localVersion, remoteVersion)
-	if localVersion < remoteVersion {
+	fmt.Printf("s3update: Local Version %s - Remote Version: %s\n", u.CurrentVersion, remoteVersion)
+	if semver.Compare(u.CurrentVersion, remoteVersion) == -1 {
 		fmt.Printf("s3update: version outdated ... \n")
 		s3Key := generateS3ReleaseKey(u.S3ReleaseKey)
 		resp, err := u.S3Client.GetObject(
@@ -173,7 +170,7 @@ func runAutoUpdate(u Updater) error {
 		// Removing backup
 		os.Remove(destBackup)
 
-		fmt.Printf("s3update: updated with success to version %d\nRestarting application\n", remoteVersion)
+		fmt.Printf("s3update: updated with success to version %s\nRestarting application\n", remoteVersion)
 
 		// The update completed, we can now restart the application without requiring any user action.
 		if err := syscall.Exec(dest, os.Args, os.Environ()); err != nil {
