@@ -1,22 +1,25 @@
 package s3update
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"golang.org/x/mod/semver"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/mitchellh/ioprogress"
 )
+
+type S3ClientWrapper struct {
+	Client *s3.Client
+}
 
 type Updater struct {
 	// CurrentVersion represents the current binary version.
@@ -32,14 +35,20 @@ type Updater struct {
 	S3ReleaseKey string
 	// S3VersionKey represents the key on S3 to download the current version
 	S3VersionKey string
-	// AWSCredentials represents the config to use to connect to s3
-	AWSCredentials *credentials.Credentials
+
+	S3Client *S3ClientWrapper
 }
+
+var defaultTimeout = 30 * time.Second
 
 // validate ensures every required fields is correctly set. Otherwise and error is returned.
 func (u Updater) validate() error {
 	if u.CurrentVersion == "" {
 		return fmt.Errorf("no version set")
+	}
+
+	if !semver.IsValid(u.CurrentVersion) {
+		return fmt.Errorf("invalid version format")
 	}
 
 	if u.S3Bucket == "" {
@@ -80,51 +89,50 @@ func AutoUpdate(u Updater) error {
 
 // generateS3ReleaseKey dynamically builds the S3 key depending on the os and architecture.
 func generateS3ReleaseKey(path string) string {
-	path = strings.Replace(path, "{{OS}}", runtime.GOOS, -1)
+	// path = strings.Replace(path, "{{OS}}", runtime.GOOS, -1)
 	path = strings.Replace(path, "{{ARCH}}", runtime.GOARCH, -1)
 
 	return path
 }
 
+func (obj *S3ClientWrapper) GetObject(input *s3.GetObjectInput) (*s3.GetObjectOutput, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	return obj.Client.GetObject(ctx, input)
+}
+
 func runAutoUpdate(u Updater) error {
-	localVersion, err := strconv.ParseInt(u.CurrentVersion, 10, 64)
-	if err != nil || localVersion == 0 {
-		return fmt.Errorf("invalid local version")
-	}
-
-	svc := s3.New(session.New(), &aws.Config{
-		Region:      aws.String(u.S3Region),
-		Credentials: u.AWSCredentials,
-	})
-
-	resp, err := svc.GetObject(&s3.GetObjectInput{Bucket: aws.String(u.S3Bucket), Key: aws.String(u.S3VersionKey)})
+	resp, err := u.S3Client.GetObject(
+		&s3.GetObjectInput{Bucket: aws.String(u.S3Bucket), Key: aws.String(u.S3VersionKey)},
+	)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
 
-	remoteVersion, err := strconv.ParseInt(string(b), 10, 64)
-	if err != nil || remoteVersion == 0 {
-		return fmt.Errorf("invalid remote version")
-	}
+	remoteVersion := string(b)
 
-	fmt.Printf("s3update: Local Version %d - Remote Version: %d\n", localVersion, remoteVersion)
-	if localVersion < remoteVersion {
+	fmt.Printf("s3update: Local Version %s - Remote Version: %s\n", u.CurrentVersion, remoteVersion)
+	// check if remoteVersion is newer
+	if semver.Compare(u.CurrentVersion, remoteVersion) == -1 {
 		fmt.Printf("s3update: version outdated ... \n")
 		s3Key := generateS3ReleaseKey(u.S3ReleaseKey)
-		resp, err := svc.GetObject(&s3.GetObjectInput{Bucket: aws.String(u.S3Bucket), Key: aws.String(s3Key)})
+		resp, err := u.S3Client.GetObject(
+			&s3.GetObjectInput{Bucket: aws.String(u.S3Bucket), Key: aws.String(s3Key)},
+		)
 		if err != nil {
 			return err
 		}
 		defer resp.Body.Close()
 		progressR := &ioprogress.Reader{
 			Reader:       resp.Body,
-			Size:         *resp.ContentLength,
+			Size:         resp.ContentLength,
 			DrawInterval: 500 * time.Millisecond,
 			DrawFunc: ioprogress.DrawTerminalf(os.Stdout, func(progress, total int64) string {
 				bar := ioprogress.DrawTextFormatBar(40)
@@ -163,7 +171,7 @@ func runAutoUpdate(u Updater) error {
 		// Removing backup
 		os.Remove(destBackup)
 
-		fmt.Printf("s3update: updated with success to version %d\nRestarting application\n", remoteVersion)
+		fmt.Printf("s3update: updated with success to version %s\nRestarting application\n", remoteVersion)
 
 		// The update completed, we can now restart the application without requiring any user action.
 		if err := syscall.Exec(dest, os.Args, os.Environ()); err != nil {
