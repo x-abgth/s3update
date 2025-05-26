@@ -132,7 +132,7 @@ func runAutoUpdate(u Updater) error {
 		defer resp.Body.Close()
 		progressR := &ioprogress.Reader{
 			Reader:       resp.Body,
-			Size:         resp.ContentLength,
+			Size:         *resp.ContentLength,
 			DrawInterval: 500 * time.Millisecond,
 			DrawFunc: ioprogress.DrawTerminalf(os.Stdout, func(progress, total int64) string {
 				bar := ioprogress.DrawTextFormatBar(40)
