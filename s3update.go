@@ -148,25 +148,33 @@ func runAutoUpdate(u Updater) error {
 		// Move the old version to a backup path that we can recover from
 		// in case the upgrade fails
 		destBackup := dest + ".bak"
-		if _, err := os.Stat(dest); err == nil {
-			os.Rename(dest, destBackup)
-		}
+		tmpDest := dest + ".tmp"
 
 		// Use the same flags that ioutil.WriteFile uses
-		f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+		f, err := os.OpenFile(tmpDest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
 		if err != nil {
-			os.Rename(destBackup, dest)
 			return err
 		}
 		defer f.Close()
 
 		fmt.Printf("s3update: downloading new version to %s\n", dest)
 		if _, err := io.Copy(f, progressR); err != nil {
-			os.Rename(destBackup, dest)
 			return err
 		}
+
 		// The file must be closed already so we can execute it in the next step
 		f.Close()
+
+		if _, err := os.Stat(dest); err == nil {
+			os.Rename(dest, destBackup)
+		}
+
+		// Replace current binary with new one
+		if err := os.Rename(tmpDest, dest); err != nil {
+			// Recovery: restore backup
+			_ = os.Rename(destBackup, dest)
+			return fmt.Errorf("failed to replace binary: %w", err)
+		}
 
 		// Removing backup
 		os.Remove(destBackup)
